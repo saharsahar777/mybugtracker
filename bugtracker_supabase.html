@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Баг-трекер (Supabase)</title>
+  <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; font-family: 'Segoe UI', Arial, sans-serif; }
+    body { background: #f0f2f5; padding: 20px; min-height: 100vh; color: #333; }
+
+    h1 { text-align: center; color: #2c3e50; margin-bottom: 14px; }
+
+    .banner {
+      max-width: 900px; margin: 0 auto 20px; padding: 10px 16px;
+      border-radius: 8px; font-size: 14px; text-align: center;
+    }
+    .banner.off { background: #fff3cd; color: #856404; }
+    .banner.on  { background: #d4edda; color: #155724; }
+
+    .add-form { display: flex; gap: 12px; max-width: 600px; margin: 0 auto 28px; }
+    .add-form input {
+      flex: 1; padding: 12px 16px; border: 2px solid #dfe4ea; border-radius: 8px;
+      font-size: 15px; outline: none; transition: border-color 0.2s;
+    }
+    .add-form input:focus { border-color: #4a90d9; }
+    .add-form button {
+      padding: 12px 24px; background: #4a90d9; color: #fff; border: none;
+      border-radius: 8px; font-size: 15px; cursor: pointer;
+    }
+    .add-form button:hover { background: #3a7bc0; }
+
+    .board {
+      display: flex; gap: 16px; overflow-x: auto;
+      justify-content: flex-start; max-width: 1400px; margin: 0 auto;
+    }
+    .column {
+      min-width: 230px; background: #e9edf2; border-radius: 12px;
+      padding: 12px; display: flex; flex-direction: column;
+    }
+    .column h2 { font-size: 17px; margin-bottom: 4px; color: #2c3e50; }
+    .column .subtitle { font-size: 13px; color: #7b8794; margin-bottom: 12px; min-height: 18px; }
+    .column .count {
+      background: #fff; border-radius: 10px; padding: 6px 10px;
+      font-size: 13px; color: #7b8794; display: inline-block;
+      width: fit-content; margin-bottom: 12px;
+    }
+    .cards { flex: 1; display: flex; flex-direction: column; gap: 10px; min-height: 60px; }
+    .column.dragover { outline: 2px dashed #4a90d9; outline-offset: -4px; }
+
+    .card {
+      background: #fff; border-radius: 8px; padding: 12px 14px;
+      box-shadow: 0 1px 3px rgba(0,0,0,0.12); cursor: grab;
+      display: flex; justify-content: space-between; align-items: center; gap: 10px;
+      transition: transform 0.15s, box-shadow 0.15s; word-break: break-word;
+    }
+    .card:hover { transform: translateY(-2px); box-shadow: 0 3px 8px rgba(0,0,0,0.15); }
+    .card.dragging { opacity: 0.5; cursor: grabbing; }
+    .card .del {
+      border: none; background: none; color: #c0392b; font-size: 16px;
+      cursor: pointer; flex-shrink: 0; padding: 2px 4px;
+    }
+    .card .del:hover { color: #e74c3c; }
+    .empty-hint { color: #a4b0bd; font-size: 13px; text-align: center; padding: 14px 0; }
+  </style>
+</head>
+<body>
+
+<h1>🐞 Баг-трекер</h1>
+<div class="banner off" id="banner">🟡 Supabase не подключён — данные хранятся только в этом браузере</div>
+
+<form class="add-form" id="addForm">
+  <input type="text" id="bugInput" placeholder="Опишите баг, например: «Кнопка логина не работает»" maxlength="120" required>
+  <button type="submit">Добавить</button>
+</form>
+
+<div class="board" id="board"></div>
+
+<script>
+// ============ НАСТРОЙКИ ============
+// Вставьте сюда свои значения из Supabase: Settings -> API
+const SUPABASE_URL = 'https://YOUR-PROJECT.supabase.co';
+const SUPABASE_KEY = 'YOUR-ANON-KEY';
+// ===================================
+
+const COLUMNS = [
+  { id: 'found',    title: 'Найдено',        subtitle: 'Новый баг' },
+  { id: 'review',   title: 'На проверке',    subtitle: 'Воспроизведение' },
+  { id: 'progress', title: 'В работе',       subtitle: 'Исправляем' },
+  { id: 'fixed',    title: 'Исправлено',     subtitle: 'Ожидает теста' },
+  { id: 'done',     title: 'Протестировано', subtitle: '' }
+];
+
+const STORE_KEY = 'bugtracker_state';
+let sb = null;
+let configured = false;
+
+if (!SUPABASE_URL.includes('YOUR-PROJECT') && !SUPABASE_KEY.includes('YOUR-ANON')) {
+  try {
+    sb = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+    configured = true;
+    const banner = document.getElementById('banner');
+    banner.textContent = '🟢 Синхронизация включена — изменения видны на всех устройствах';
+    banner.classList.remove('off');
+    banner.classList.add('on');
+  } catch (e) {
+    console.error('Ошибка подключения к Supabase:', e);
+  }
+}
+
+let bugs = JSON.parse(localStorage.getItem(STORE_KEY) || 'null') || [
+  { id: 1, text: 'При загрузке страницы мигает футер', status: 'found' },
+  { id: 2, text: 'Ошибка 500 при отправке формы',      status: 'progress' }
+];
+
+function saveLocal() { localStorage.setItem(STORE_KEY, JSON.stringify(bugs)); }
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+// ============ РАБОТА С СЕРВЕРОМ ============
+
+async function loadFromServer() {
+  if (!configured) { render(); return; }
+  const { data, error } = await sb.from('bugs').select('*').order('id');
+  if (error) { console.error('Ошибка загрузки:', error); render(); return; }
+  bugs = data.map(r => ({ id: r.id, text: r.text, status: r.status }));
+  saveLocal();
+  render();
+}
+
+async function addBug(text) {
+  const local = { id: -Date.now(), text, status: 'found' }; // временный id до ответа сервера
+  bugs.push(local);
+  saveLocal(); render();
+  if (!configured) return;
+  const { data, error } = await sb.from('bugs').insert({ text, status: 'found' }).select();
+  if (!error && data && data[0]) {
+    local.id = data[0].id;
+    saveLocal(); render();
+  } else if (error) {
+    console.error('Ошибка добавления:', error);
+  }
+}
+
+async function moveBug(id, status) {
+  const bug = bugs.find(b => b.id === id);
+  if (!bug) return;
+  bug.status = status;
+  saveLocal(); render();
+  if (!configured) return;
+  const { error } = await sb.from('bugs').update({ status }).eq('id', id);
+  if (error) console.error('Ошибка перемещения:', error);
+}
+
+async function deleteBug(id) {
+  bugs = bugs.filter(b => b.id !== id);
+  saveLocal(); render();
+  if (!configured) return;
+  const { error } = await sb.from('bugs').delete().eq('id', id);
+  if (error) console.error('Ошибка удаления:', error);
+}
+
+function subscribe() {
+  if (!configured) return;
+  sb.channel('bugs-room')
+    .on('postgres_changes', { event: '*', schema: 'public', table: 'bugs' }, payload => {
+      // свою вставку уже отрисовали — не перезагружаем
+      if (payload.event === 'INSERT' && bugs.some(b => b.id === payload.new.id)) return;
+      loadFromServer();
+    })
+    .subscribe();
+}
+
+// ============ ОТРИСОВКА ============
+
+function render() {
+  const board = document.getElementById('board');
+  board.innerHTML = '';
+  COLUMNS.forEach(col => {
+    const column = document.createElement('div');
+    column.className = 'column';
+    column.dataset.status = col.id;
+
+    const items = bugs.filter(b => b.status === col.id);
+    column.innerHTML =
+      '<h2>' + col.title + '</h2>' +
+      '<div class="subtitle">' + (col.subtitle || '&nbsp;') + '</div>' +
+      '<span class="count">' + items.length + '</span>';
+
+    const cards = document.createElement('div');
+    cards.className = 'cards';
+
+    if (!items.length) {
+      cards.innerHTML = '<div class="empty-hint">Перетащите баг сюда</div>';
+    }
+
+    items.forEach(bug => {
+      const card = document.createElement('div');
+      card.className = 'card';
+      card.draggable = true;
+      card.dataset.id = bug.id;
+      card.innerHTML = '<span>' + escapeHtml(bug.text) + '</span>' +
+                       '<button class="del" title="Удалить">✕</button>';
+      card.querySelector('.del').onclick = () => deleteBug(bug.id);
+
+      card.addEventListener('dragstart', e => {
+        e.dataTransfer.setData('text/plain', String(bug.id));
+        card.classList.add('dragging');
+      });
+      card.addEventListener('dragend', () => card.classList.remove('dragging'));
+
+      cards.appendChild(card);
+    });
+
+    column.appendChild(cards);
+
+    column.addEventListener('dragover', e => {
+      e.preventDefault();
+      column.classList.add('dragover');
+    });
+    column.addEventListener('dragleave', () => column.classList.remove('dragover'));
+    column.addEventListener('drop', e => {
+      e.preventDefault();
+      column.classList.remove('dragover');
+      const id = Number(e.dataTransfer.getData('text/plain'));
+      if (id) moveBug(id, col.id);
+    });
+
+    board.appendChild(column);
+  });
+}
+
+document.getElementById('addForm').addEventListener('submit', e => {
+  e.preventDefault();
+  const input = document.getElementById('bugInput');
+  const text = input.value.trim();
+  if (!text) return;
+  input.value = '';
+  addBug(text);
+});
+
+// Старт: загружаем с сервера (или рисуем локально) и включаем подписку
+loadFromServer().then(subscribe);
+</script>
+
+</body>
+</html>
